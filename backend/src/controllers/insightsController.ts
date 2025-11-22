@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
-import adaptiveLearningService from '../services/adaptiveLearningService';
-import { asyncHandler } from '../middleware/errorHandler';
+import adaptiveLearningService from '../services/adaptiveLearningService.js';
+import { asyncHandler } from '../middleware/errorHandler.js';
 
 export const getLearningInsights = asyncHandler(async (req: Request, res: Response) => {
   const { userId, unitId } = req.params;

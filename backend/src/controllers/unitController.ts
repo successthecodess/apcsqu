@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
-import prisma from '../config/database';
-import { asyncHandler } from '../middleware/errorHandler';
+import prisma from '../config/database.js';
+import { asyncHandler } from '../middleware/errorHandler.js';
 
 export const getAllUnits = asyncHandler(async (req: Request, res: Response) => {
   const units = await prisma.unit.findMany({

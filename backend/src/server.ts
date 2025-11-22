@@ -1,11 +1,11 @@
 import express, { Application } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { errorHandler } from './middleware/errorHandler';
-import questionRoutes from './routes/questionRoutes';
-import unitRoutes from './routes/unitRoutes';
-import practiceRoutes from './routes/practiceRoutes';
-import insightsRoutes from './routes/insightsRoutes'; // Add this
+import { errorHandler } from './middleware/errorHandler.js';
+import questionRoutes from './routes/questionRoutes.js';
+import unitRoutes from './routes/unitRoutes.js';
+import practiceRoutes from './routes/practiceRoutes.js';
+import insightsRoutes from './routes/insightsRoutes.js'; 
 
 dotenv.config();
 

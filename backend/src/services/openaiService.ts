@@ -1,7 +1,7 @@
 import openai from '../config/openai.js';
 import { QuestionType, DifficultyLevel } from '@prisma/client';
-import { unitPrompts } from './prompts/unitPrompts';
-import { getQuestionTemplate } from './prompts/questionTemplates';
+import { unitPrompts } from './prompts/unitPrompts.js';
+import { getQuestionTemplate } from './prompts/questionTemplates.js';
 
 interface GeneratedQuestion {
   questionText: string;

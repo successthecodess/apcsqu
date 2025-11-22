@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
-import questionService from '../services/questionService';
-import { asyncHandler } from '../middleware/errorHandler';
+import questionService from '../services/questionService.js';
+import { asyncHandler } from '../middleware/errorHandler.js';
 import { QuestionType, DifficultyLevel } from '@prisma/client';
 
 export const generateQuestion = asyncHandler(async (req: Request, res: Response) => {

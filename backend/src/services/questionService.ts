@@ -1,7 +1,7 @@
-import prisma from '../config/database';
-import openaiService from './openaiService';
+import prisma from '../config/database.js';
+import openaiService from './openaiService.js';
 import { QuestionType, DifficultyLevel } from '@prisma/client';
-import { AppError } from '../middleware/errorHandler';
+import { AppError } from '../middleware/errorHandler.js';
 
 interface GenerateQuestionOptions {
   unitId: string;

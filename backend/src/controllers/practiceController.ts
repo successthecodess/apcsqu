@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
-import practiceSessionService from '../services/practiceSessionService';
-import { asyncHandler } from '../middleware/errorHandler';
+import practiceSessionService from '../services/practiceSessionService.js';
+import { asyncHandler } from '../middleware/errorHandler.js';
 
 export const startPracticeSession = asyncHandler(async (req: Request, res: Response) => {
   console.log('📝 Practice session start request:', req.body);
