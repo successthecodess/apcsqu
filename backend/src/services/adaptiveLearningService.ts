@@ -406,8 +406,8 @@ export class AdaptiveLearningService {
         easeFactor: nextEaseFactor,
         interval: nextInterval,
         nextReviewDate,
-        strugglingTopics: patterns.weakTopics.length > 0 ? patterns.weakTopics : null,
-        commonMistakes: Object.keys(patterns.commonMistakes).length > 0 ? patterns.commonMistakes : null,
+      strugglingTopics: patterns.weakTopics.length > 0 ? patterns.weakTopics : undefined,
+commonMistakes: Object.keys(patterns.commonMistakes).length > 0 ? patterns.commonMistakes : undefined,
       },
     });
 
