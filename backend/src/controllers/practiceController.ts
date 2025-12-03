@@ -3,92 +3,79 @@ import practiceSessionService from '../services/practiceSessionService.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 
 export const startPracticeSession = asyncHandler(async (req: Request, res: Response) => {
-  console.log('📝 Practice session start request:', req.body);
-  
-  const { userId, unitId, topicId, userEmail, userName } = req.body;
+  const { userId, unitId, topicId, userEmail, userName, targetQuestions } = req.body;
 
-  // Validate inputs
-  if (!userId) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'userId is required',
-    });
-  }
+  const result = await practiceSessionService.startSession(
+    userId,
+    unitId,
+    topicId,
+    userEmail,
+    userName,
+    targetQuestions
+  );
 
-  if (!unitId) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'unitId is required',
-    });
-  }
-
-  try {
-    const result = await practiceSessionService.startSession(
-      userId, 
-      unitId, 
-      topicId,
-      userEmail,
-      userName
-    );
-
-    console.log('✅ Session started successfully');
-
-    res.status(201).json({
-      status: 'success',
-      data: result,
-    });
-  } catch (error) {
-    console.error('❌ Failed to start session:', error);
-    throw error;
-  }
+  res.status(200).json({
+    status: 'success',
+    data: result,
+  });
 });
 
 export const getNextQuestion = asyncHandler(async (req: Request, res: Response) => {
-  console.log('📝 Get next question request:', req.body);
-  
-  const { userId, sessionId, unitId, answeredQuestionIds, topicId } = req.body;
+  const { userId, sessionId, unitId, answeredQuestionIds } = req.body;
 
   const question = await practiceSessionService.getNextQuestion(
     userId,
     sessionId,
     unitId,
-    answeredQuestionIds || [],
-    topicId
+    answeredQuestionIds
   );
 
-  res.json({
+  res.status(200).json({
     status: 'success',
     data: { question },
   });
 });
 
 export const submitAnswer = asyncHandler(async (req: Request, res: Response) => {
-  console.log('📝 Submit answer request:', req.body);
-  
   const { userId, sessionId, questionId, userAnswer, timeSpent } = req.body;
 
-  const result = await practiceSessionService.submitAnswer(
+  console.log('🔍 Received answer submission:', {
     userId,
     sessionId,
     questionId,
-    userAnswer,
+    userAnswer: userAnswer?.substring(0, 50), // Log first 50 chars
     timeSpent
-  );
-
-  res.json({
-    status: 'success',
-    data: result,
   });
+
+  try {
+    const result = await practiceSessionService.submitAnswer(
+      userId,
+      sessionId,
+      questionId,
+      userAnswer,
+      timeSpent
+    );
+
+    console.log('✅ Answer processed successfully');
+
+    res.status(200).json({
+      status: 'success',
+      data: result,
+    });
+  } catch (error: any) {
+    console.error('❌ Error in submitAnswer controller:', error);
+    throw error; // Let error handler middleware handle it
+  }
 });
 
 export const endPracticeSession = asyncHandler(async (req: Request, res: Response) => {
-  console.log('📝 End session request:', req.params);
-  
   const { sessionId } = req.params;
+
+  console.log('🏁 Ending session via API:', sessionId);
 
   const result = await practiceSessionService.endSession(sessionId);
 
-  res.json({
+  res.status(200).json({
     status: 'success',
     data: result,
   });

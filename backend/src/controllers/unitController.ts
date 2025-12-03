@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
 import prisma from '../config/database.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
+import { asyncHandler, AppError } from '../middleware/errorHandler.js';
 
-export const getAllUnits = asyncHandler(async (req: Request, res: Response) => {
+export const getUnits = asyncHandler(async (req: Request, res: Response) => {
   const units = await prisma.unit.findMany({
     where: { isActive: true },
     include: {
@@ -14,17 +14,34 @@ export const getAllUnits = asyncHandler(async (req: Request, res: Response) => {
     orderBy: { unitNumber: 'asc' },
   });
 
-  res.json({
+  // Get question counts for each unit
+  const unitsWithCounts = await Promise.all(
+    units.map(async (unit) => {
+      const questionCount = await prisma.question.count({
+        where: {
+          unitId: unit.id,
+          approved: true,
+        },
+      });
+
+      return {
+        ...unit,
+        questionCount,
+      };
+    })
+  );
+
+  res.status(200).json({
     status: 'success',
-    data: { units },
+    data: { units: unitsWithCounts },
   });
 });
 
 export const getUnitById = asyncHandler(async (req: Request, res: Response) => {
-  const { id } = req.params;
+  const { unitId } = req.params;
 
   const unit = await prisma.unit.findUnique({
-    where: { id },
+    where: { id: unitId },
     include: {
       topics: {
         where: { isActive: true },
@@ -34,31 +51,45 @@ export const getUnitById = asyncHandler(async (req: Request, res: Response) => {
   });
 
   if (!unit) {
-    return res.status(404).json({
-      status: 'error',
-      message: 'Unit not found',
-    });
+    throw new AppError('Unit not found', 404);
   }
 
-  res.json({
-    status: 'success',
-    data: { unit },
-  });
-});
-
-export const getUserProgress = asyncHandler(async (req: Request, res: Response) => {
-  const { userId } = req.params;
-
-  const progress = await prisma.progress.findMany({
-    where: { userId },
-    include: {
-      unit: true,
-      topic: true,
+  // Get question count
+  const questionCount = await prisma.question.count({
+    where: {
+      unitId: unit.id,
+      approved: true,
     },
   });
 
-  res.json({
+  res.status(200).json({
     status: 'success',
-    data: { progress },
+    data: { 
+      unit: {
+        ...unit,
+        questionCount,
+      },
+    },
+  });
+});
+
+export const getTopicsByUnit = asyncHandler(async (req: Request, res: Response) => {
+  const { unitId } = req.params;
+
+  console.log('Fetching topics for unit:', unitId);
+
+  const topics = await prisma.topic.findMany({
+    where: {
+      unitId,
+      isActive: true,
+    },
+    orderBy: { orderIndex: 'asc' },
+  });
+
+  console.log('Found topics:', topics.length);
+
+  res.status(200).json({
+    status: 'success',
+    data: { topics },
   });
 });

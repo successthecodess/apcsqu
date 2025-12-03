@@ -8,16 +8,19 @@ export class AppError extends Error {
     super(message);
     this.statusCode = statusCode;
     this.isOperational = true;
+
     Error.captureStackTrace(this, this.constructor);
   }
 }
 
 export const errorHandler = (
-  err: Error,
+  err: Error | AppError,
   req: Request,
   res: Response,
   next: NextFunction
 ) => {
+  console.error('❌ Error:', err);
+
   if (err instanceof AppError) {
     return res.status(err.statusCode).json({
       status: 'error',
@@ -25,11 +28,25 @@ export const errorHandler = (
     });
   }
 
-  console.error('ERROR:', err);
+  // Prisma errors
+  if (err.name === 'PrismaClientKnownRequestError') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Database operation failed',
+    });
+  }
 
+  if (err.name === 'PrismaClientValidationError') {
+    return res.status(400).json({
+      status: 'error',
+      message: 'Invalid data provided',
+    });
+  }
+
+  // Default error
   res.status(500).json({
     status: 'error',
-    message: 'Something went wrong!',
+    message: 'Internal server error',
   });
 };
 

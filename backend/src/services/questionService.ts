@@ -1,148 +1,130 @@
 import prisma from '../config/database.js';
-import openaiService from './openaiService.js';
-import { QuestionType, DifficultyLevel } from '@prisma/client';
+import { DifficultyLevel, QuestionType, Question } from '@prisma/client';
 import { AppError } from '../middleware/errorHandler.js';
 
-interface GenerateQuestionOptions {
-  unitId: string;
-  topicId?: string;
-  type: QuestionType;
-  difficulty: DifficultyLevel;
-  autoApprove?: boolean;
-}
-
 export class QuestionService {
-  async generateAndStoreQuestion(options: GenerateQuestionOptions) {
-    const { unitId, topicId, type, difficulty, autoApprove = false } = options;
-
-    // Get unit and topic info
-    const unit = await prisma.unit.findUnique({
-      where: { id: unitId },
-      include: { topics: true },
-    });
-
-    if (!unit) {
-      throw new AppError('Unit not found', 404);
-    }
-
-    let topic;
-    let topicName;
-    if (topicId) {
-      topic = await prisma.topic.findUnique({ where: { id: topicId } });
-      if (topic) {
-        topicName = topic.name;
-      }
-    }
-
-    // Generate question using OpenAI
-    console.log(`Generating ${type} question for Unit ${unit.unitNumber} at ${difficulty} level`);
+  /**
+   * Parse options from JsonValue to string array
+   */
+  private parseOptions(options: any): string[] {
+    if (!options) return [];
     
-    const generated = await openaiService.generateQuestion(
-      unit.unitNumber,
-      type,
-      difficulty,
-      topicName
-    );
-
-    // Validate question quality
-    const validation = await openaiService.validateQuestionQuality(generated);
+    if (Array.isArray(options)) {
+      return options as string[];
+    }
     
-    console.log('Question validation:', validation);
-
-    // Store in database
-    const question = await prisma.question.create({
-      data: {
-        unitId,
-        topicId,
-        type,
-        difficulty,
-        questionText: generated.questionText,
-        codeSnippet: generated.codeSnippet,
-        options: generated.options,
-        correctAnswer: generated.correctAnswer,
-        explanation: generated.explanation,
-        aiGenerated: true,
-        approved: autoApprove || validation.score >= 80,
-        qualityScore: validation.score / 20, // Convert to 1-5 scale
-      },
-      include: {
-        unit: true,
-        topic: true,
-      },
-    });
-
-    return {
-      question,
-      validation,
-    };
-  }
-
-  async generateBulkQuestions(
-    unitId: string,
-    count: number,
-    options?: {
-      topicId?: string;
-      type?: QuestionType;
-      difficulty?: DifficultyLevel;
-      distributeDifficulty?: boolean;
-      distributeTypes?: boolean;
-    }
-  ) {
-    const results = [];
-    const errors = [];
-
-    // Get unit info
-    const unit = await prisma.unit.findUnique({
-      where: { id: unitId },
-    });
-
-    if (!unit) {
-      throw new AppError('Unit not found', 404);
-    }
-
-    // Determine distribution
-    const difficulties: DifficultyLevel[] = options?.distributeDifficulty
-      ? ['EASY', 'MEDIUM', 'HARD', 'EXPERT']
-      : [options?.difficulty || 'MEDIUM'];
-
-    const types: QuestionType[] = options?.distributeTypes
-      ? ['MULTIPLE_CHOICE', 'FREE_RESPONSE', 'CODE_ANALYSIS']
-      : [options?.type || 'MULTIPLE_CHOICE'];
-
-    for (let i = 0; i < count; i++) {
+    if (typeof options === 'string') {
       try {
-        const difficulty = difficulties[i % difficulties.length];
-        const type = types[i % types.length];
+        const parsed = JSON.parse(options);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [options];
+      }
+    }
+    
+    return [];
+  }
 
-        const result = await this.generateAndStoreQuestion({
-          unitId,
-          topicId: options?.topicId,
-          type,
-          difficulty,
-          autoApprove: false,
-        });
+  /**
+   * Normalize answer for comparison - handles formatting differences
+   */
+  private normalizeAnswer(answer: string): string {
+    let normalized = answer
+      .trim()
+      .toLowerCase()
+      // Remove option prefixes like "A)", "B)", "a.", "1)", etc.
+      .replace(/^[a-z]\)\s*/i, '')
+      .replace(/^[a-z]\.\s*/i, '')
+      .replace(/^[0-9]\)\s*/i, '')
+      .replace(/^[0-9]\.\s*/i, '')
+      .replace(/`/g, '') // Remove backticks
+      .replace(/\s+/g, ' ') // Normalize whitespace to single space
+      .replace(/[.,;:!?'"]/g, '') // Remove punctuation
+      .replace(/\n/g, ' ') // Replace newlines with space
+      .replace(/\r/g, ''); // Remove carriage returns
 
-        results.push(result);
+    return normalized.trim();
+  }
 
-        // Small delay between generations
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      } catch (error) {
-        console.error(`Failed to generate question ${i + 1}:`, error);
-        errors.push({
-          index: i + 1,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
+  /**
+   * Check if answer is correct - ENHANCED VERSION WITH DEBUG LOGGING
+   */
+  private checkAnswer(userAnswer: string, correctAnswer: string, options: string[], type: QuestionType): boolean {
+    console.log('\n=== ANSWER CHECK START ===');
+    console.log('Raw Input:');
+    console.log('  User Answer:', JSON.stringify(userAnswer));
+    console.log('  Correct Answer:', JSON.stringify(correctAnswer));
+    console.log('  Options:', JSON.stringify(options));
+    console.log('  Type:', type);
+
+    // Normalize both answers
+    const normalizedUserAnswer = this.normalizeAnswer(userAnswer);
+    const normalizedCorrectAnswer = this.normalizeAnswer(correctAnswer);
+    
+    console.log('\nNormalized:');
+    console.log('  User:', JSON.stringify(normalizedUserAnswer));
+    console.log('  Correct:', JSON.stringify(normalizedCorrectAnswer));
+
+    // Direct match after normalization
+    if (normalizedUserAnswer === normalizedCorrectAnswer) {
+      console.log('✅ MATCH: Direct normalized match');
+      console.log('=== ANSWER CHECK END ===\n');
+      return true;
+    }
+
+    // For multiple choice, try to match by finding the correct option
+    if (type === 'MULTIPLE_CHOICE' || type === 'TRUE_FALSE' || type === 'CODE_ANALYSIS') {
+      console.log('\nOption Matching:');
+      
+      // Normalize all options
+      const normalizedOptions = options.map(opt => ({
+        original: opt,
+        normalized: this.normalizeAnswer(opt)
+      }));
+
+      console.log('  Normalized Options:');
+      normalizedOptions.forEach((opt, idx) => {
+        console.log(`    [${idx}] "${opt.original}" -> "${opt.normalized}"`);
+      });
+
+      // Find which option the user selected
+      const userSelectedOption = normalizedOptions.find(opt => 
+        opt.normalized === normalizedUserAnswer || opt.original === userAnswer
+      );
+
+      // Find which option is correct
+      // First try: exact match
+      let correctOption = normalizedOptions.find(opt => 
+        opt.normalized === normalizedCorrectAnswer || opt.original === correctAnswer
+      );
+
+      // Second try: if correct answer is just a letter like "A", find option starting with it
+      if (!correctOption && /^[A-D]$/i.test(correctAnswer)) {
+        console.log(`  Correct answer is just letter "${correctAnswer}", finding matching option...`);
+        const letterPattern = new RegExp(`^${correctAnswer}[)\\.]?\\s*`, 'i');
+        correctOption = normalizedOptions.find(opt => letterPattern.test(opt.original));
+      }
+
+      console.log('\nMatching Results:');
+      console.log('  User Selected:', userSelectedOption ? JSON.stringify(userSelectedOption.original) : 'NOT FOUND');
+      console.log('  Correct Option:', correctOption ? JSON.stringify(correctOption.original) : 'NOT FOUND');
+
+      if (userSelectedOption && correctOption) {
+        const isMatch = userSelectedOption.original === correctOption.original;
+        console.log(`${isMatch ? '✅' : '❌'} RESULT: ${isMatch ? 'CORRECT' : 'WRONG'}`);
+        console.log('=== ANSWER CHECK END ===\n');
+        return isMatch;
       }
     }
 
-    return {
-      success: results.length,
-      failed: errors.length,
-      results,
-      errors,
-    };
+    console.log('❌ RESULT: No match found');
+    console.log('=== ANSWER CHECK END ===\n');
+    return false;
   }
 
+  /**
+   * Get questions by unit with filters
+   */
   async getQuestionsByUnit(
     unitId: string,
     filters?: {
@@ -175,57 +157,116 @@ export class QuestionService {
     return questions;
   }
 
+  /**
+   * Get a random question (excluding specified IDs to prevent repeats)
+   */
   async getRandomQuestion(
     unitId: string,
     difficulty: DifficultyLevel,
     excludeIds: string[] = []
-  ) {
-    // Get count of available questions
+  ): Promise<Question | null> {
+    console.log('🎲 Getting random question:', { 
+      unitId, 
+      difficulty, 
+      excludeCount: excludeIds.length 
+    });
+
+    try {
+      const availableQuestions = await prisma.question.findMany({
+        where: {
+          unitId,
+          difficulty,
+          approved: true,
+          id: {
+            notIn: excludeIds,
+          },
+        },
+        include: {
+          unit: true,
+          topic: true,
+        },
+      });
+
+      if (availableQuestions.length === 0) {
+        console.log(`⚠️ No ${difficulty} questions available (${excludeIds.length} excluded)`);
+        return null;
+      }
+
+      const randomIndex = Math.floor(Math.random() * availableQuestions.length);
+      const selectedQuestion = availableQuestions[randomIndex];
+
+      console.log(`✅ Found ${difficulty} question:`, selectedQuestion.id);
+
+      return selectedQuestion;
+    } catch (error) {
+      console.error('❌ Error getting random question:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Check if a unit has any approved questions
+   */
+  async hasQuestions(unitId: string): Promise<boolean> {
     const count = await prisma.question.count({
       where: {
         unitId,
-        difficulty,
         approved: true,
-        id: { notIn: excludeIds },
       },
     });
 
-    if (count === 0) {
-      // No questions available, generate one
-      const result = await this.generateAndStoreQuestion({
-        unitId,
-        difficulty,
-        type: 'MULTIPLE_CHOICE',
-        autoApprove: true,
-      });
-      return result.question;
-    }
-
-    // Get random question
-    const skip = Math.floor(Math.random() * count);
-    const question = await prisma.question.findFirst({
-      where: {
-        unitId,
-        difficulty,
-        approved: true,
-        id: { notIn: excludeIds },
-      },
-      skip,
-      include: {
-        unit: true,
-        topic: true,
-      },
-    });
-
-    return question;
+    return count > 0;
   }
 
+  /**
+   * Get question count by difficulty for a unit
+   */
+  async getQuestionCounts(unitId: string): Promise<{
+    total: number;
+    byDifficulty: Record<DifficultyLevel, number>;
+  }> {
+    const questions = await prisma.question.findMany({
+      where: {
+        unitId,
+        approved: true,
+      },
+      select: {
+        difficulty: true,
+      },
+    });
+
+    const byDifficulty: Record<DifficultyLevel, number> = {
+      EASY: 0,
+      MEDIUM: 0,
+      HARD: 0,
+      EXPERT: 0,
+    };
+
+    questions.forEach((q) => {
+      byDifficulty[q.difficulty]++;
+    });
+
+    return {
+      total: questions.length,
+      byDifficulty,
+    };
+  }
+
+  /**
+   * Submit an answer and check if it's correct
+   */
   async submitAnswer(
     userId: string,
     questionId: string,
     userAnswer: string,
     timeSpent?: number
-  ) {
+  ): Promise<{
+    id: string;
+    isCorrect: boolean;
+    correctAnswer: string;
+    explanation: string;
+    userAnswer: string;
+  }> {
     const question = await prisma.question.findUnique({
       where: { id: questionId },
     });
@@ -234,7 +275,23 @@ export class QuestionService {
       throw new AppError('Question not found', 404);
     }
 
-    const isCorrect = this.checkAnswer(userAnswer, question.correctAnswer, question.type);
+    // Parse options from JSON
+    const options = this.parseOptions(question.options);
+
+    console.log('\n📝 SUBMIT ANSWER');
+    console.log('Question ID:', questionId);
+    console.log('Question Type:', question.type);
+
+    // Check answer using improved normalization
+    const isCorrect = this.checkAnswer(
+      userAnswer, 
+      question.correctAnswer, 
+      options, 
+      question.type
+    );
+
+    console.log(`\n🎯 FINAL RESULT: ${isCorrect ? '✅ CORRECT' : '❌ WRONG'}`);
+    console.log('========================================\n');
 
     // Update question statistics
     await prisma.question.update({
@@ -263,28 +320,17 @@ export class QuestionService {
     });
 
     return {
-      ...response,
+      id: response.id,
+      isCorrect,
       correctAnswer: question.correctAnswer,
       explanation: question.explanation,
+      userAnswer,
     };
   }
 
-  private checkAnswer(userAnswer: string, correctAnswer: string, type: QuestionType): boolean {
-    if (type === 'MULTIPLE_CHOICE' || type === 'TRUE_FALSE' || type === 'CODE_ANALYSIS') {
-      // Extract just the letter (A, B, C, D)
-      const userLetter = userAnswer.trim().toUpperCase().charAt(0);
-      const correctLetter = correctAnswer.trim().toUpperCase().charAt(0);
-      return userLetter === correctLetter;
-    }
-
-    // For free response and code completion, use more sophisticated checking
-    // This is a simplified version - you may want to implement more advanced comparison
-    const normalizedUser = userAnswer.trim().toLowerCase().replace(/\s+/g, ' ');
-    const normalizedCorrect = correctAnswer.trim().toLowerCase().replace(/\s+/g, ' ');
-
-    return normalizedUser === normalizedCorrect;
-  }
-
+  /**
+   * Approve or reject a question
+   */
   async approveQuestion(questionId: string, approved: boolean) {
     const question = await prisma.question.update({
       where: { id: questionId },
@@ -294,13 +340,25 @@ export class QuestionService {
     return question;
   }
 
+  /**
+   * Update question quality score
+   */
   async updateQuestionQuality(questionId: string, qualityScore: number) {
     const question = await prisma.question.update({
       where: { id: questionId },
-      data: { qualityScore: qualityScore / 20 }, // Convert 0-100 to 1-5
+      data: { qualityScore: qualityScore / 20 },
     });
 
     return question;
+  }
+
+  /**
+   * Delete a question
+   */
+  async deleteQuestion(questionId: string) {
+    return await prisma.question.delete({
+      where: { id: questionId },
+    });
   }
 }
 

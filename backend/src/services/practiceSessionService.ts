@@ -7,56 +7,79 @@ export class PracticeSessionService {
   private readonly QUESTIONS_PER_SESSION = 40;
 
   /**
-   * Ensure user exists in database (create if not)
+   * Ensure user exists in database
    */
   private async ensureUserExists(userId: string, userEmail?: string, userName?: string) {
+    console.log('Ensuring user exists:', userId);
+    
     let user = await prisma.user.findUnique({
       where: { id: userId },
     });
 
-    if (!user) {
-      console.log('Creating new user in database:', userId);
+    if (user) {
+      const updates: any = {
+        lastActive: new Date(),
+      };
+
+      if (userName && userName !== user.name) {
+        updates.name = userName;
+      }
+
+      if (userEmail && userEmail !== user.email) {
+        const emailExists = await prisma.user.findFirst({
+          where: {
+            email: userEmail,
+            id: { not: userId },
+          },
+        });
+
+        if (!emailExists) {
+          updates.email = userEmail;
+        }
+      }
+
+      if (Object.keys(updates).length > 1) {
+        user = await prisma.user.update({
+          where: { id: userId },
+          data: updates,
+        });
+        console.log('✅ User updated:', user.id);
+      } else {
+        console.log('✅ User found (no updates needed):', user.id);
+      }
+    } else {
+      const email = userEmail || `${userId}-${Date.now()}@clerk.user`;
+      
       user = await prisma.user.create({
         data: {
           id: userId,
-          email: userEmail || `${userId}@clerk.user`,
+          email: email,
           name: userName,
           password: 'clerk-managed',
         },
       });
+      console.log('✅ User created:', user.id);
     }
 
     return user;
   }
 
   /**
-   * Get all questions user has answered for this unit (across all sessions)
+   * Start a new practice session with configurable question count
    */
-  private async getUserAnsweredQuestions(userId: string, unitId: string): Promise<string[]> {
-    const responses = await prisma.questionResponse.findMany({
-      where: {
-        userId,
-        question: { unitId },
-      },
-      select: {
-        questionId: true,
-      },
-    });
-
-    return responses.map(r => r.questionId);
-  }
-
-  /**
-   * Start a new practice session with target of 40 questions
-   */
-  async startSession(userId: string, unitId: string, topicId?: string, userEmail?: string, userName?: string) {
-    console.log('🎯 Starting practice session:', { userId, unitId, topicId });
+  async startSession(
+    userId: string, 
+    unitId: string, 
+    topicId?: string, 
+    userEmail?: string, 
+    userName?: string,
+    targetQuestions: number = 40
+  ) {
+    console.log('🎯 Starting practice session:', { userId, unitId, topicId, targetQuestions });
 
     try {
-      // Ensure user exists in database
       await this.ensureUserExists(userId, userEmail, userName);
 
-      // Verify unit exists
       const unit = await prisma.unit.findUnique({
         where: { id: unitId },
       });
@@ -67,11 +90,18 @@ export class PracticeSessionService {
 
       console.log('✅ Unit found:', unit.name);
 
-      // Get all previously answered questions for this unit
-      const globalAnsweredQuestions = await this.getUserAnsweredQuestions(userId, unitId);
-      console.log(`📊 User has answered ${globalAnsweredQuestions.length} questions for this unit`);
+      const hasQuestions = await questionService.hasQuestions(unitId);
+      
+      if (!hasQuestions) {
+        throw new AppError(
+          `No approved questions available for ${unit.name}. Please contact your administrator to add questions.`,
+          404
+        );
+      }
 
-      // Get current progress and recommended difficulty
+      const counts = await questionService.getQuestionCounts(unitId);
+      console.log('📊 Question counts:', counts);
+
       const recommendedDifficulty = await adaptiveLearningService.getRecommendedDifficulty(
         userId,
         unitId,
@@ -80,7 +110,6 @@ export class PracticeSessionService {
 
       console.log('📊 Recommended difficulty:', recommendedDifficulty);
 
-      // Create session with target questions
       const session = await prisma.studySession.create({
         data: {
           userId,
@@ -89,37 +118,40 @@ export class PracticeSessionService {
           sessionType: 'PRACTICE',
           totalQuestions: 0,
           correctAnswers: 0,
-          targetQuestions: this.QUESTIONS_PER_SESSION,
+          targetQuestions: targetQuestions,
         },
       });
 
       console.log('✅ Session created:', session.id);
 
-      // Get first question (excluding globally answered questions)
-      const question = await questionService.getRandomQuestion(
-        unitId, 
-        recommendedDifficulty, 
-        globalAnsweredQuestions
-      );
+      const question = await questionService.getRandomQuestion(unitId, recommendedDifficulty, []);
 
       if (!question) {
-        console.log('⚠️ No new questions available, generating one...');
-        const result = await questionService.generateAndStoreQuestion({
-          unitId,
-          topicId,
-          type: 'MULTIPLE_CHOICE',
-          difficulty: recommendedDifficulty,
-          autoApprove: true,
-        });
-        
-        console.log('✅ Question generated:', result.question.id);
+        const difficulties = ['EASY', 'MEDIUM', 'HARD', 'EXPERT'];
+        let foundQuestion = null;
+
+        for (const diff of difficulties) {
+          foundQuestion = await questionService.getRandomQuestion(unitId, diff as any, []);
+          if (foundQuestion) {
+            console.log(`✅ Found question at ${diff} difficulty`);
+            break;
+          }
+        }
+
+        if (!foundQuestion) {
+          throw new AppError(
+            `No questions available for ${unit.name}. Please contact your administrator to add questions.`,
+            404
+          );
+        }
 
         return {
           session,
-          question: result.question,
+          question: foundQuestion,
           recommendedDifficulty,
-          questionsRemaining: this.QUESTIONS_PER_SESSION - 1,
-          totalQuestions: this.QUESTIONS_PER_SESSION,
+          questionsRemaining: targetQuestions - 1,
+          totalQuestions: targetQuestions,
+          questionCounts: counts,
         };
       }
 
@@ -129,8 +161,9 @@ export class PracticeSessionService {
         session,
         question,
         recommendedDifficulty,
-        questionsRemaining: this.QUESTIONS_PER_SESSION - 1,
-        totalQuestions: this.QUESTIONS_PER_SESSION,
+        questionsRemaining: targetQuestions - 1,
+        totalQuestions: targetQuestions,
+        questionCounts: counts,
       };
     } catch (error) {
       console.error('❌ Error in startSession:', error);
@@ -139,7 +172,7 @@ export class PracticeSessionService {
   }
 
   /**
-   * Get next question in session (no repeats globally)
+   * Get next question in session (no repeats)
    */
   async getNextQuestion(
     userId: string,
@@ -152,12 +185,10 @@ export class PracticeSessionService {
       userId, 
       sessionId, 
       unitId, 
-      sessionAnswered: answeredQuestionIds.length,
-      remaining: this.QUESTIONS_PER_SESSION - answeredQuestionIds.length
+      answeredCount: answeredQuestionIds.length,
     });
 
     try {
-      // Check if session is complete
       const session = await prisma.studySession.findUnique({
         where: { id: sessionId },
       });
@@ -166,16 +197,15 @@ export class PracticeSessionService {
         throw new AppError('Session not found', 404);
       }
 
-      if (session.totalQuestions >= this.QUESTIONS_PER_SESSION) {
+      const targetQuestions = session.targetQuestions || this.QUESTIONS_PER_SESSION;
+
+      if (session.totalQuestions >= targetQuestions) {
         console.log('✅ Session complete!');
         return null;
       }
 
-      // Get all previously answered questions for this unit (global)
-      const globalAnsweredQuestions = await this.getUserAnsweredQuestions(userId, unitId);
-      console.log(`📊 Total questions answered for unit: ${globalAnsweredQuestions.length}`);
+      console.log(`Remaining: ${targetQuestions - session.totalQuestions}`);
 
-      // Get recommended difficulty based on current progress
       const recommendedDifficulty = await adaptiveLearningService.getRecommendedDifficulty(
         userId,
         unitId,
@@ -184,16 +214,14 @@ export class PracticeSessionService {
 
       console.log('📊 Recommended difficulty:', recommendedDifficulty);
 
-      // Get question at recommended difficulty (excluding all answered globally)
       let question = await questionService.getRandomQuestion(
         unitId,
         recommendedDifficulty,
-        globalAnsweredQuestions
+        answeredQuestionIds
       );
 
-      // If no question at recommended difficulty, try other difficulties
       if (!question) {
-        console.log('⚠️ No new questions at recommended difficulty, trying others...');
+        console.log('⚠️ No question at recommended difficulty, trying others...');
         const difficulties = ['EASY', 'MEDIUM', 'HARD', 'EXPERT'];
         
         for (const difficulty of difficulties) {
@@ -202,32 +230,35 @@ export class PracticeSessionService {
           question = await questionService.getRandomQuestion(
             unitId,
             difficulty as any,
-            globalAnsweredQuestions
+            answeredQuestionIds
           );
           
           if (question) {
-            console.log(`✅ Found new question at ${difficulty} difficulty`);
+            console.log(`✅ Found question at ${difficulty} difficulty`);
             break;
           }
         }
       }
 
-      // If still no question, generate one
       if (!question) {
-        console.log('⚠️ No new questions available in database, generating...');
-        const result = await questionService.generateAndStoreQuestion({
-          unitId,
-          topicId,
-          type: 'MULTIPLE_CHOICE',
-          difficulty: recommendedDifficulty,
-          autoApprove: true,
-        });
+        console.log('⚠️ No more questions available in question bank');
         
-        console.log('✅ Question generated:', result.question.id);
-        return result.question;
+        const totalQuestions = await questionService.getQuestionCounts(unitId);
+        
+        if (answeredQuestionIds.length >= totalQuestions.total) {
+          throw new AppError(
+            `You've completed all ${totalQuestions.total} available questions for this unit! Great job! 🎉`,
+            404
+          );
+        } else {
+          throw new AppError(
+            'No more questions available at this time. Please try again later or contact your administrator.',
+            404
+          );
+        }
       }
 
-      console.log('✅ New question found:', question.id);
+      console.log('✅ Question found:', question.id);
       return question;
     } catch (error) {
       console.error('❌ Error in getNextQuestion:', error);
@@ -235,10 +266,8 @@ export class PracticeSessionService {
     }
   }
 
-  // ... rest of the methods stay the same (submitAnswer, endSession)
-  
   /**
-   * Submit answer and get feedback
+   * Submit an answer for a question in a session
    */
   async submitAnswer(
     userId: string,
@@ -247,59 +276,49 @@ export class PracticeSessionService {
     userAnswer: string,
     timeSpent?: number
   ) {
-    console.log('🎯 Submitting answer:', { userId, sessionId, questionId, userAnswer });
+    console.log('📝 Submitting answer:', { userId, sessionId, questionId, timeSpent });
 
     try {
-      // Get question details
-      const question = await prisma.question.findUnique({
-        where: { id: questionId },
-        include: { unit: true, topic: true },
-      });
-
-      if (!question) {
-        throw new AppError('Question not found', 404);
-      }
-
-      // Check answer
-      const result = await questionService.submitAnswer(userId, questionId, userAnswer, timeSpent);
-
-      console.log('✅ Answer checked:', result.isCorrect ? 'Correct' : 'Incorrect');
-
-      // Update progress and get difficulty adjustment
-      const progressUpdate = await adaptiveLearningService.updateProgress(
+      // Submit answer to question service
+      const result = await questionService.submitAnswer(
         userId,
-        question.unitId,
-        result.isCorrect,
-        timeSpent,
-        question.topicId ?? undefined
+        questionId,
+        userAnswer,
+        timeSpent
       );
 
-      console.log('📊 Progress updated:', progressUpdate);
+      console.log('✅ Answer result:', result.isCorrect ? '✅ Correct' : '❌ Incorrect');
 
       // Update session statistics
-      const updatedSession = await prisma.studySession.update({
+      const updateData: any = {
+        totalQuestions: { increment: 1 },
+      };
+
+      if (result.isCorrect) {
+        updateData.correctAnswers = { increment: 1 };
+      }
+
+      const session = await prisma.studySession.update({
         where: { id: sessionId },
-        data: {
-          totalQuestions: { increment: 1 },
-          correctAnswers: result.isCorrect ? { increment: 1 } : undefined,
-        },
+        data: updateData,
       });
 
-      // Store response with session link
-      await prisma.questionResponse.update({
-        where: { id: result.id },
-        data: { sessionId },
-      });
+      console.log('✅ Session updated');
 
-      // Check if session is complete
-      const isComplete = updatedSession.totalQuestions >= this.QUESTIONS_PER_SESSION;
+      // Update user progress for this question and get progress metrics
+      const progress = await adaptiveLearningService.updateProgress(
+        userId,
+        questionId,
+        result.isCorrect,
+        timeSpent
+      );
+
+      console.log('✅ User progress updated');
 
       return {
         ...result,
-        progress: progressUpdate,
-        difficultyChanged: progressUpdate.currentDifficulty !== question.difficulty,
-        questionsRemaining: this.QUESTIONS_PER_SESSION - updatedSession.totalQuestions,
-        isSessionComplete: isComplete,
+        session,
+        progress,
       };
     } catch (error) {
       console.error('❌ Error in submitAnswer:', error);
@@ -308,22 +327,92 @@ export class PracticeSessionService {
   }
 
   /**
-   * End practice session and return summary
+   * End a practice session and calculate final statistics
    */
   async endSession(sessionId: string) {
-    const session = await prisma.studySession.findUnique({
-      where: { id: sessionId },
-      include: {
-        responses: {
-          include: {
-            question: {
-              include: {
-                topic: true,
+    console.log('🏁 Ending session:', sessionId);
+
+    try {
+      const session = await prisma.studySession.findUnique({
+        where: { id: sessionId },
+        include: {
+          responses: {
+            include: {
+              question: {
+                include: {
+                  topic: true,
+                },
               },
             },
           },
-          orderBy: { createdAt: 'asc' },
         },
+      });
+
+      if (!session) {
+        throw new AppError('Session not found', 404);
+      }
+
+      // Calculate session duration
+      const duration = Math.floor(
+        (new Date().getTime() - new Date(session.startedAt).getTime()) / 1000
+      );
+
+      // Calculate average time per question
+      const averageTime = session.totalQuestions > 0
+        ? duration / session.totalQuestions
+        : 0;
+
+      // Calculate accuracy rate
+      const accuracyRate = session.totalQuestions > 0
+        ? (session.correctAnswers / session.totalQuestions) * 100
+        : 0;
+
+      // Update session with final statistics
+      const updatedSession = await prisma.studySession.update({
+        where: { id: sessionId },
+        data: {
+          endedAt: new Date(),
+          totalDuration: duration,
+          averageTime,
+          accuracyRate,
+        },
+      });
+
+      console.log('✅ Session ended successfully');
+
+      // Prepare summary
+      const summary = {
+        totalQuestions: session.totalQuestions,
+        correctAnswers: session.correctAnswers,
+        accuracyRate: Math.round(accuracyRate),
+        totalDuration: duration,
+        averageTime: Math.round(averageTime),
+        responses: session.responses.map((r) => ({
+          questionId: r.questionId,
+          isCorrect: r.isCorrect,
+          timeSpent: r.timeSpent || 0,
+          topic: r.question.topic?.name || 'General',
+        })),
+      };
+
+      return {
+        session: updatedSession,
+        summary,
+      };
+    } catch (error) {
+      console.error('❌ Error in endSession:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get session statistics
+   */
+  async getSessionStats(sessionId: string) {
+    const session = await prisma.studySession.findUnique({
+      where: { id: sessionId },
+      include: {
+        responses: true,
       },
     });
 
@@ -331,64 +420,13 @@ export class PracticeSessionService {
       throw new AppError('Session not found', 404);
     }
 
-    // Calculate session statistics
-    const totalTime = session.responses.reduce((sum, r) => sum + (r.timeSpent || 0), 0);
-    const averageTime = session.totalQuestions > 0 ? totalTime / session.totalQuestions : 0;
-    const accuracyRate = session.totalQuestions > 0 
-      ? (session.correctAnswers / session.totalQuestions) * 100 
-      : 0;
-
-    // Calculate topic breakdown
-    const topicStats: Record<string, { correct: number; total: number }> = {};
-    for (const response of session.responses) {
-      const topicName = response.question.topic?.name || 'General';
-      if (!topicStats[topicName]) {
-        topicStats[topicName] = { correct: 0, total: 0 };
-      }
-      topicStats[topicName].total++;
-      if (response.isCorrect) {
-        topicStats[topicName].correct++;
-      }
-    }
-
-    // Calculate difficulty breakdown
-    const difficultyStats: Record<string, { correct: number; total: number }> = {};
-    for (const response of session.responses) {
-      const difficulty = response.question.difficulty;
-      if (!difficultyStats[difficulty]) {
-        difficultyStats[difficulty] = { correct: 0, total: 0 };
-      }
-      difficultyStats[difficulty].total++;
-      if (response.isCorrect) {
-        difficultyStats[difficulty].correct++;
-      }
-    }
-
-    // Update session
-    const updatedSession = await prisma.studySession.update({
-      where: { id: sessionId },
-      data: {
-        endedAt: new Date(),
-        totalDuration: totalTime,
-        averageTime,
-        accuracyRate,
-        goalAchieved: accuracyRate >= 80,
-      },
-    });
-
     return {
-      session: updatedSession,
-      summary: {
-        totalQuestions: session.totalQuestions,
-        correctAnswers: session.correctAnswers,
-        accuracyRate: Math.round(accuracyRate),
-        totalTime,
-        averageTime: Math.round(averageTime),
-        topicBreakdown: topicStats,
-        difficultyBreakdown: difficultyStats,
-        targetQuestions: this.QUESTIONS_PER_SESSION,
-        completionPercentage: Math.round((session.totalQuestions / this.QUESTIONS_PER_SESSION) * 100),
-      },
+      totalQuestions: session.totalQuestions,
+      correctAnswers: session.correctAnswers,
+      accuracy: session.totalQuestions > 0
+        ? (session.correctAnswers / session.totalQuestions) * 100
+        : 0,
+      responsesCount: session.responses.length,
     };
   }
 }

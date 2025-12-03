@@ -12,7 +12,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "test:generate": "tsx src/scripts/testQuestionGeneration.ts",
-    "seed:questions": "tsx src/scripts/seedQuestions.ts"
+    "seed:questions": "tsx prisma/seeds/apcsaQuestions.ts",
+    "seed:settings": "tsx prisma/seeds/seedSettings.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -25,16 +26,21 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@clerk/express": "^1.7.53",
     "@prisma/client": "^6.19.0",
     "cors": "^2.8.5",
+    "csv-parser": "^3.2.0",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "multer": "^2.0.2",
     "openai": "^6.9.1",
-    "prisma": "^6.19.0"
+    "prisma": "^6.19.0",
+    "stripe": "^20.0.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.5",
+    "@types/multer": "^2.0.0",
     "@types/node": "^24.10.1",
     "nodemon": "^3.1.11",
     "ts-node": "^10.9.2",

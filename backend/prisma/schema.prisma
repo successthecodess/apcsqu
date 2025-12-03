@@ -41,7 +41,14 @@ enum UserRole {
   TEACHER
   ADMIN
 }
-
+model PlatformSettings {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String   // Store as JSON string
+  category  String   // general, questions, adaptive, notifications, security, api
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
 // ============================================
 // CURRICULUM STRUCTURE
 // ============================================

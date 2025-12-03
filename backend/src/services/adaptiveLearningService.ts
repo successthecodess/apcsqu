@@ -1,5 +1,6 @@
 import prisma from '../config/database.js';
 import { DifficultyLevel, Prisma } from '@prisma/client';
+import { AppError } from '../middleware/errorHandler.js';
 
 interface ProgressMetrics {
   currentDifficulty: DifficultyLevel;
@@ -34,7 +35,8 @@ export class AdaptiveLearningService {
   // Spaced repetition constants (SM-2 Algorithm)
   private readonly MIN_EASE_FACTOR = 1.3;
   private readonly DEFAULT_EASE_FACTOR = 2.5;
-  private readonly EASE_FACTOR_ADJUSTMENT = 0.15;
+  private readonly MAX_EASE_FACTOR = 3.0;
+  private readonly MAX_INTERVAL_DAYS = 365;
 
   /**
    * Find progress using composite key
@@ -53,7 +55,6 @@ export class AdaptiveLearningService {
 
   /**
    * Determine next difficulty based on comprehensive performance metrics
-   * More balanced approach to difficulty adjustment
    */
   getNextDifficulty(
     currentDifficulty: DifficultyLevel,
@@ -66,13 +67,10 @@ export class AdaptiveLearningService {
     const difficulties: DifficultyLevel[] = ['EASY', 'MEDIUM', 'HARD', 'EXPERT'];
     const currentIndex = difficulties.indexOf(currentDifficulty);
 
-    // Don't change difficulty too early - need at least 3 attempts
     if (totalAttempts < 3) {
       return currentDifficulty;
     }
 
-    // === INCREASE DIFFICULTY ===
-    // Move up if doing consistently well
     const shouldAdvance = 
       consecutiveCorrect >= this.CORRECT_STREAK_TO_ADVANCE &&
       masteryLevel >= this.MASTERY_THRESHOLD_MEDIUM &&
@@ -81,44 +79,28 @@ export class AdaptiveLearningService {
 
     if (shouldAdvance && currentIndex < difficulties.length - 1) {
       console.log(`🎯 Advancing difficulty: ${currentDifficulty} → ${difficulties[currentIndex + 1]}`);
-      console.log(`   Streak: ${consecutiveCorrect}, Mastery: ${masteryLevel}%, Recent: ${recentAccuracy}%`);
       return difficulties[currentIndex + 1];
     }
 
-    // === DECREASE DIFFICULTY ===
-    // More forgiving decrease conditions
     const shouldDecrease = 
-      // Immediate decrease: 2 wrong in a row
       consecutiveWrong >= this.WRONG_STREAK_TO_DECREASE ||
-      
-      // Recent performance is poor (last 10 questions < 50%)
       (recentAccuracy < 50 && totalAttempts >= 10) ||
-      
-      // Overall mastery is low after enough attempts
       (masteryLevel < this.MASTERY_THRESHOLD_LOW && totalAttempts >= 10) ||
-      
-      // Struggling at higher difficulties (more lenient)
-      (currentIndex >= 2 && recentAccuracy < 60 && totalAttempts >= 8); // HARD/EXPERT
+      (currentIndex >= 2 && recentAccuracy < 60 && totalAttempts >= 8);
 
     if (shouldDecrease && currentIndex > 0) {
       console.log(`📉 Decreasing difficulty: ${currentDifficulty} → ${difficulties[currentIndex - 1]}`);
-      console.log(`   Wrong streak: ${consecutiveWrong}, Mastery: ${masteryLevel}%, Recent: ${recentAccuracy}%`);
       return difficulties[currentIndex - 1];
     }
 
-    // === SMART ADJUSTMENTS ===
-    // If at EXPERT and struggling (even without consecutive wrong)
     if (currentIndex === 3 && recentAccuracy < 65 && totalAttempts >= 6) {
       console.log(`📉 Dropping from EXPERT due to recent struggles`);
-      console.log(`   Recent accuracy: ${recentAccuracy}%`);
-      return difficulties[2]; // Drop to HARD
+      return difficulties[2];
     }
 
-    // If at EASY and doing great, nudge them up faster
     if (currentIndex === 0 && recentAccuracy >= 90 && totalAttempts >= 4) {
       console.log(`🎯 Fast-tracking from EASY due to strong performance`);
-      console.log(`   Recent accuracy: ${recentAccuracy}%`);
-      return difficulties[1]; // Move to MEDIUM
+      return difficulties[1];
     }
 
     return currentDifficulty;
@@ -126,7 +108,6 @@ export class AdaptiveLearningService {
 
   /**
    * Calculate mastery level with exponential moving average
-   * Weights recent performance more heavily
    */
   calculateMasteryLevel(
     currentMastery: number,
@@ -136,15 +117,10 @@ export class AdaptiveLearningService {
   ): number {
     if (totalAttempts === 0) return 0;
     
-    // Overall accuracy
     const overallAccuracy = (correctAttempts / totalAttempts) * 100;
-    
-    // Apply exponential moving average (weight recent performance)
-    const alpha = 0.3; // Smoothing factor (higher = more weight on recent)
+    const alpha = 0.3;
     const recentImpact = isCorrect ? 100 : 0;
     const newMastery = (alpha * recentImpact) + ((1 - alpha) * currentMastery);
-    
-    // Blend overall accuracy with EMA
     const blendedMastery = (overallAccuracy * 0.6) + (newMastery * 0.4);
     
     return Math.min(100, Math.max(0, Math.round(blendedMastery)));
@@ -171,18 +147,18 @@ export class AdaptiveLearningService {
 
   /**
    * Spaced Repetition: Calculate next review date using SM-2 algorithm
+   * WITH SAFETY CAPS to prevent date overflow
    */
   calculateNextReview(
     currentInterval: number,
     easeFactor: number,
-    quality: number // 0-5 scale (5=perfect, 0=complete failure)
+    quality: number
   ): { nextInterval: number; nextEaseFactor: number; nextReviewDate: Date } {
     let newEaseFactor = easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
-    newEaseFactor = Math.max(this.MIN_EASE_FACTOR, newEaseFactor);
+    newEaseFactor = Math.max(this.MIN_EASE_FACTOR, Math.min(newEaseFactor, this.MAX_EASE_FACTOR));
 
     let nextInterval: number;
     if (quality < 3) {
-      // Failed recall - reset interval
       nextInterval = 1;
     } else {
       if (currentInterval === 0) {
@@ -193,6 +169,9 @@ export class AdaptiveLearningService {
         nextInterval = Math.round(currentInterval * newEaseFactor);
       }
     }
+
+    // CRITICAL: Cap interval to prevent overflow
+    nextInterval = Math.min(nextInterval, this.MAX_INTERVAL_DAYS);
 
     const nextReviewDate = new Date();
     nextReviewDate.setDate(nextReviewDate.getDate() + nextInterval);
@@ -210,18 +189,16 @@ export class AdaptiveLearningService {
   private calculateQuality(isCorrect: boolean, timeSpent?: number, averageTime?: number): number {
     if (!isCorrect) return 0;
 
-    // Base quality for correct answer
     let quality = 4;
 
-    // Adjust based on time taken
     if (timeSpent && averageTime) {
       const timeRatio = timeSpent / averageTime;
       if (timeRatio < 0.5) {
-        quality = 5; // Very fast and correct
+        quality = 5;
       } else if (timeRatio < 0.8) {
-        quality = 4; // Good speed
+        quality = 4;
       } else if (timeRatio > 1.5) {
-        quality = 3; // Slow but correct
+        quality = 3;
       }
     }
 
@@ -232,7 +209,6 @@ export class AdaptiveLearningService {
    * Track performance patterns and identify weak areas
    */
   async analyzePerformancePatterns(userId: string, unitId: string): Promise<PerformancePattern> {
-    // Get all responses for this unit
     const responses = await prisma.questionResponse.findMany({
       where: {
         userId,
@@ -244,10 +220,9 @@ export class AdaptiveLearningService {
         },
       },
       orderBy: { createdAt: 'desc' },
-      take: 50, // Analyze last 50 attempts
+      take: 50,
     });
 
-    // Analyze by topic
     const topicPerformance: Record<string, { correct: number; total: number }> = {};
     const mistakeTypes: Record<string, number> = {};
     const times: number[] = [];
@@ -263,7 +238,6 @@ export class AdaptiveLearningService {
       if (response.isCorrect) {
         topicPerformance[topicName].correct++;
       } else {
-        // Track mistake types
         const difficulty = response.question.difficulty;
         mistakeTypes[difficulty] = (mistakeTypes[difficulty] || 0) + 1;
       }
@@ -273,7 +247,6 @@ export class AdaptiveLearningService {
       }
     }
 
-    // Identify weak and strong topics
     const weakTopics: string[] = [];
     const strongTopics: string[] = [];
 
@@ -286,7 +259,6 @@ export class AdaptiveLearningService {
       }
     }
 
-    // Calculate time statistics
     const avgTime = times.length > 0 
       ? times.reduce((a, b) => a + b, 0) / times.length 
       : 0;
@@ -306,126 +278,145 @@ export class AdaptiveLearningService {
   }
 
   /**
-   * Update user progress with comprehensive metrics
+   * Update user progress after answering a question
    */
   async updateProgress(
     userId: string,
-    unitId: string,
+    questionId: string,
     isCorrect: boolean,
-    timeSpent?: number,
-    topicId?: string
-  ): Promise<ProgressMetrics> {
-    const topicIdValue = topicId === undefined ? null : topicId;
+    timeSpent?: number
+  ) {
+    console.log('📊 Updating progress:', { userId, questionId, isCorrect });
 
-    // Find existing progress
-    let progress = await this.findProgress(userId, unitId, topicId);
-
-    if (!progress) {
-      progress = await prisma.progress.create({
-        data: {
-          userId,
-          unitId,
-          topicId: topicIdValue,
-          currentDifficulty: 'EASY',
-          totalAttempts: 0,
-          correctAttempts: 0,
-          consecutiveCorrect: 0,
-          consecutiveWrong: 0,
-          masteryLevel: 0,
-          easeFactor: this.DEFAULT_EASE_FACTOR,
-          interval: 0,
+    try {
+      const question = await prisma.question.findUnique({
+        where: { id: questionId },
+        include: {
+          unit: true,
+          topic: true,
         },
       });
-    }
 
-    // Update streaks
-    const newConsecutiveCorrect = isCorrect ? progress.consecutiveCorrect + 1 : 0;
-    const newConsecutiveWrong = !isCorrect ? progress.consecutiveWrong + 1 : 0;
-    const newTotalAttempts = progress.totalAttempts + 1;
-    const newCorrectAttempts = progress.correctAttempts + (isCorrect ? 1 : 0);
+      if (!question) {
+        console.error('❌ Question not found:', questionId);
+        throw new AppError('Question not found', 404);
+      }
 
-    // Calculate new mastery level with EMA
-    const newMasteryLevel = this.calculateMasteryLevel(
-      progress.masteryLevel,
-      newCorrectAttempts,
-      newTotalAttempts,
-      isCorrect
-    );
+      const unitId = question.unitId;
+      const topicId = question.topicId || undefined; // Convert null to undefined
 
-    // Get recent accuracy
-    const recentAccuracy = await this.calculateRecentAccuracy(userId, unitId);
+      console.log('📚 Question unit:', question.unit?.name, 'Topic:', question.topic?.name || 'None');
 
-    console.log('📊 Performance Metrics:', {
-      consecutiveCorrect: newConsecutiveCorrect,
-      consecutiveWrong: newConsecutiveWrong,
-      masteryLevel: newMasteryLevel,
-      recentAccuracy,
-      totalAttempts: newTotalAttempts,
-    });
+      let progress = await this.findProgress(userId, unitId, topicId);
 
-    // Determine next difficulty
-    const newDifficulty = this.getNextDifficulty(
-      progress.currentDifficulty,
-      newConsecutiveCorrect,
-      newConsecutiveWrong,
-      newMasteryLevel,
-      newTotalAttempts,
-      recentAccuracy
-    );
+      if (!progress) {
+        console.log('Creating new progress record...');
+        progress = await prisma.progress.create({
+          data: {
+            userId,
+            unitId,
+            topicId: topicId || null, // Convert undefined back to null for database
+            currentDifficulty: 'EASY',
+            totalAttempts: 0,
+            correctAttempts: 0,
+            consecutiveCorrect: 0,
+            consecutiveWrong: 0,
+            masteryLevel: 0,
+            easeFactor: this.DEFAULT_EASE_FACTOR,
+            interval: 0,
+            totalTimeSpent: 0,
+            averageTimePerQuestion: 0,
+          },
+        });
+      }
 
-    // Spaced repetition calculation
-    const quality = this.calculateQuality(isCorrect, timeSpent, progress.averageTimePerQuestion || undefined);
-    const { nextInterval, nextEaseFactor, nextReviewDate } = this.calculateNextReview(
-      progress.interval,
-      progress.easeFactor,
-      quality
-    );
+      const newConsecutiveCorrect = isCorrect ? progress.consecutiveCorrect + 1 : 0;
+      const newConsecutiveWrong = !isCorrect ? progress.consecutiveWrong + 1 : 0;
+      const newTotalAttempts = progress.totalAttempts + 1;
+      const newCorrectAttempts = progress.correctAttempts + (isCorrect ? 1 : 0);
 
-    // Update time tracking
-    const newTotalTimeSpent = progress.totalTimeSpent + (timeSpent || 0);
-    const newAverageTime = newTotalAttempts > 0 
-      ? newTotalTimeSpent / newTotalAttempts 
-      : 0;
+      const newMasteryLevel = this.calculateMasteryLevel(
+        progress.masteryLevel,
+        newCorrectAttempts,
+        newTotalAttempts,
+        isCorrect
+      );
 
-    // Analyze performance patterns
-    const patterns = await this.analyzePerformancePatterns(userId, unitId);
+      const recentAccuracy = await this.calculateRecentAccuracy(userId, unitId);
 
-    // Update progress with all new metrics
-    const updatedProgress = await prisma.progress.update({
-      where: { id: progress.id },
-      data: {
-        currentDifficulty: newDifficulty,
+      console.log('📊 Performance Metrics:', {
         consecutiveCorrect: newConsecutiveCorrect,
         consecutiveWrong: newConsecutiveWrong,
-        totalAttempts: newTotalAttempts,
-        correctAttempts: newCorrectAttempts,
         masteryLevel: newMasteryLevel,
-        lastPracticed: new Date(),
-        totalTimeSpent: newTotalTimeSpent,
-        averageTimePerQuestion: newAverageTime,
-        easeFactor: nextEaseFactor,
-        interval: nextInterval,
-        nextReviewDate,
-      strugglingTopics: patterns.weakTopics.length > 0 ? patterns.weakTopics : undefined,
-commonMistakes: Object.keys(patterns.commonMistakes).length > 0 ? patterns.commonMistakes : undefined,
-      },
-    });
+        recentAccuracy,
+        totalAttempts: newTotalAttempts,
+      });
 
-    return {
-      currentDifficulty: updatedProgress.currentDifficulty,
-      consecutiveCorrect: updatedProgress.consecutiveCorrect,
-      consecutiveWrong: updatedProgress.consecutiveWrong,
-      totalAttempts: updatedProgress.totalAttempts,
-      correctAttempts: updatedProgress.correctAttempts,
-      masteryLevel: updatedProgress.masteryLevel,
-      nextReviewDate: updatedProgress.nextReviewDate || undefined,
-      easeFactor: updatedProgress.easeFactor,
-    };
+      const newDifficulty = this.getNextDifficulty(
+        progress.currentDifficulty,
+        newConsecutiveCorrect,
+        newConsecutiveWrong,
+        newMasteryLevel,
+        newTotalAttempts,
+        recentAccuracy
+      );
+
+      const quality = this.calculateQuality(isCorrect, timeSpent, progress.averageTimePerQuestion || undefined);
+      const { nextInterval, nextEaseFactor, nextReviewDate } = this.calculateNextReview(
+        progress.interval,
+        progress.easeFactor,
+        quality
+      );
+
+      const newTotalTimeSpent = progress.totalTimeSpent + (timeSpent || 0);
+      const newAverageTime = newTotalAttempts > 0 
+        ? newTotalTimeSpent / newTotalAttempts 
+        : 0;
+
+      const patterns = await this.analyzePerformancePatterns(userId, unitId);
+
+      const updatedProgress = await prisma.progress.update({
+        where: { id: progress.id },
+        data: {
+          currentDifficulty: newDifficulty,
+          consecutiveCorrect: newConsecutiveCorrect,
+          consecutiveWrong: newConsecutiveWrong,
+          totalAttempts: newTotalAttempts,
+          correctAttempts: newCorrectAttempts,
+          masteryLevel: newMasteryLevel,
+          lastPracticed: new Date(),
+          totalTimeSpent: newTotalTimeSpent,
+          averageTimePerQuestion: newAverageTime,
+          easeFactor: nextEaseFactor,
+          interval: nextInterval,
+          nextReviewDate: nextReviewDate,
+          strugglingTopics: patterns.weakTopics.length > 0 ? patterns.weakTopics : null,
+          commonMistakes: Object.keys(patterns.commonMistakes).length > 0 ? patterns.commonMistakes : null,
+        },
+      });
+
+      console.log('✅ Progress updated:', {
+        mastery: updatedProgress.masteryLevel,
+        difficulty: updatedProgress.currentDifficulty,
+        streak: isCorrect ? updatedProgress.consecutiveCorrect : updatedProgress.consecutiveWrong,
+      });
+
+      return {
+        currentDifficulty: updatedProgress.currentDifficulty,
+        consecutiveCorrect: updatedProgress.consecutiveCorrect,
+        consecutiveWrong: updatedProgress.consecutiveWrong,
+        totalAttempts: updatedProgress.totalAttempts,
+        correctAttempts: updatedProgress.correctAttempts,
+        masteryLevel: updatedProgress.masteryLevel,
+        nextReviewDate: updatedProgress.nextReviewDate || undefined,
+        easeFactor: updatedProgress.easeFactor,
+      };
+    } catch (error) {
+      console.error('❌ Error updating progress:', error);
+      throw error;
+    }
   }
 
-  /**
-   * Get current progress for a user and unit
-   */
   async getProgress(userId: string, unitId: string, topicId?: string): Promise<ProgressMetrics | null> {
     const progress = await this.findProgress(userId, unitId, topicId);
 
@@ -443,20 +434,15 @@ commonMistakes: Object.keys(patterns.commonMistakes).length > 0 ? patterns.commo
     };
   }
 
-  /**
-   * Get recommended difficulty with spaced repetition consideration
-   */
   async getRecommendedDifficulty(userId: string, unitId: string, topicId?: string): Promise<DifficultyLevel> {
     const progress = await this.getProgress(userId, unitId, topicId);
     
     if (!progress) {
-      return 'EASY'; // Start with easy for new users
+      return 'EASY';
     }
 
-    // Check if topic needs review based on spaced repetition
     if (progress.nextReviewDate && new Date() >= progress.nextReviewDate) {
       console.log('📅 Spaced repetition: Review needed for this topic');
-      // Start review at one difficulty level lower
       const difficulties: DifficultyLevel[] = ['EASY', 'MEDIUM', 'HARD', 'EXPERT'];
       const currentIndex = difficulties.indexOf(progress.currentDifficulty);
       return currentIndex > 0 ? difficulties[currentIndex - 1] : progress.currentDifficulty;
@@ -465,9 +451,6 @@ commonMistakes: Object.keys(patterns.commonMistakes).length > 0 ? patterns.commo
     return progress.currentDifficulty;
   }
 
-  /**
-   * Get comprehensive learning insights
-   */
   async getLearningInsights(userId: string, unitId: string) {
     const progress = await this.findProgress(userId, unitId);
     const patterns = await this.analyzePerformancePatterns(userId, unitId);
@@ -498,13 +481,9 @@ commonMistakes: Object.keys(patterns.commonMistakes).length > 0 ? patterns.commo
     return insights;
   }
 
-  /**
-   * Generate personalized recommendations
-   */
   private generateRecommendations(progress: any, patterns: PerformancePattern): string[] {
     const recommendations: string[] = [];
 
-    // Mastery-based recommendations
     if (progress.masteryLevel < 50) {
       recommendations.push('Focus on fundamentals - review basic concepts');
     } else if (progress.masteryLevel < 75) {
@@ -513,17 +492,14 @@ commonMistakes: Object.keys(patterns.commonMistakes).length > 0 ? patterns.commo
       recommendations.push('Excellent mastery! Try more challenging problems');
     }
 
-    // Weak topics
     if (patterns.weakTopics.length > 0) {
       recommendations.push(`Review these topics: ${patterns.weakTopics.join(', ')}`);
     }
 
-    // Time-based recommendations
     if (patterns.timePatterns.averageTimePerQuestion > 180) {
       recommendations.push('Try to improve response time with timed practice');
     }
 
-    // Consistency
     if (progress.consecutiveWrong >= 2) {
       recommendations.push('Take a short break and review explanations carefully');
     }
@@ -531,9 +507,6 @@ commonMistakes: Object.keys(patterns.commonMistakes).length > 0 ? patterns.commo
     return recommendations;
   }
 
-  /**
-   * Get units that need review (spaced repetition)
-   */
   async getUnitsNeedingReview(userId: string): Promise<string[]> {
     const now = new Date();
     const progressRecords = await prisma.progress.findMany({

@@ -1,10 +1,10 @@
-import express from 'express';
-import * as unitController from '../controllers/unitController.js';
+import { Router } from 'express';
+import { getUnits, getUnitById, getTopicsByUnit } from '../controllers/unitController.js';
 
-const router = express.Router();
+const router = Router();
 
-router.get('/', unitController.getAllUnits);
-router.get('/:id', unitController.getUnitById);
-router.get('/progress/:userId', unitController.getUserProgress);
+router.get('/', getUnits);
+router.get('/:unitId/topics', getTopicsByUnit); // This must come BEFORE /:unitId
+router.get('/:unitId', getUnitById);
 
 export default router;
