@@ -1,0 +1,16 @@
+import express from 'express';
+import {
+  startPracticeSession,
+  getNextQuestion,
+  submitAnswer,
+  endPracticeSession,
+} from '../controllers/practiceController.js';
+
+const router = express.Router();
+
+router.post('/start', startPracticeSession);
+router.post('/next', getNextQuestion);
+router.post('/submit', submitAnswer);
+router.post('/end/:sessionId', endPracticeSession);  // Make sure this exists
+
+export default router;
